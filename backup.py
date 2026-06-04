@@ -4,6 +4,8 @@ import logging
 import hashlib
 import json
 import time
+import argparse
+import sys
 from notify import send_webhook, send_rich_notification
 from datetime import datetime
 from pathlib import Path
@@ -93,57 +95,97 @@ def create_compressed_backup(source, destination_file):
         return False
     
 
-if __name__ == '__main__':
-    # Ensure backup directory exists
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+def main():
 
+    """Main entry point with CLI argument parsing."""
+    parser = argparse.ArgumentParser(
+        description='Backup Script - Automated compressed backups with integrity verification',
+        epilog='Example: %(prog)s --source ~/docs --dest /mnt/backups --notify'
+    )
+    parser.add_argument(
+        '-s', '--source',
+        type=str,
+        default=str(SOURCE),
+        help=f'Source directory to backup (default: {SOURCE})'
+    )
+    parser.add_argument(
+        '-d', '--dest',
+        type=str,
+        default=str(BACKUP_DIR),
+        help=f'Destination directory for backups (default: {BACKUP_DIR})'
+    )
+    parser.add_argument(
+        '-n', '--notify',
+        action='store_true',
+        help='Send webhook notification after backup'
+    )
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Suppress terminal output (logs still recorded)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Convert string paths to Path objects
+    source = Path(args.source).expanduser().resolve()
+    dest = Path(args.dest).expanduser().resolve()
+    
+    # Validate source exists
+    if not source.exists():
+        print(f'✗ Error: Source directory does not exist: {source}')
+        sys.exit(1)
+    
+    # Ensure destination exists
+    dest.mkdir(parents=True, exist_ok=True)
+    
     # Start timer
     start_time = time.time()
-
-    # Generate unique timestamp
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-    # Step 1: Generate manifest BEFORE backup
-    print('Calculating file hashes...')
-    manifest = generate_manifest(SOURCE)
-    manifest_path = BACKUP_DIR / f'manifest_{timestamp}.json'
-
+    
+    # Step 1: Generate manifest
+    if not args.quiet:
+        print('🔍 Calculating file hashes...')
+    manifest = generate_manifest(source)
+    manifest_path = dest / f'manifest_{timestamp}.json'
+    
     with open(manifest_path, 'w') as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
     logging.info(f'Manifest saved: {manifest_path}')
-    print(f'Manifest saved: {manifest_path}')
-    print(f'Files processed: {len(manifest)}')
-
+    if not args.quiet:
+        print(f'✓ Manifest saved: {manifest_path}')
+        print(f'  Files processed: {len(manifest)}')
+    
     # Step 2: Create compressed backup
-    print('Creating compressed backup...')
-    backup_file = BACKUP_DIR / f'backup_{timestamp}.tar.gz'
-    success = create_compressed_backup(SOURCE, backup_file)
-
+    if not args.quiet:
+        print('📦 Creating compressed backup...')
+    backup_file = dest / f'backup_{timestamp}.tar.gz'
+    success = create_compressed_backup(source, backup_file)
+    
     # Step 3: Calculate duration
     duration = time.time() - start_time
-
-
-    # Step 4: Generate summary report
+    
+    # Step 4: Report and notify
     if success:
         size_bytes = backup_file.stat().st_size
-        if size_bytes < 1024 * 1024:  # Less than 1 MB
-                size_display = f'{size_bytes / 1024:.2f} KB'
+        if size_bytes < 1024 * 1024:
+            size_display = f'{size_bytes / 1024:.2f} KB'
         else:
-                size_display = f'{size_bytes / (1024 * 1024):.2f} MB'
-
-        # Terminal output
-        print(f'\n Backup completed sucessfully!')
-        print(f'Archive: {backup_file.name}')
-        print(f'   Size: {size_display}')
-        print(f'   Files: {len(manifest)}')
-        print(f'   Duration: {duration:.4f} seconds')
-        print(f'Manifest: {manifest_path.name}')
-
-        # Save JSON summary report
-        report= {
+            size_display = f'{size_bytes / (1024 * 1024):.2f} MB'
+        
+        if not args.quiet:
+            print(f'\n✅ Backup completed successfully!')
+            print(f'   Archive: {backup_file.name}')
+            print(f'   Size: {size_display}')
+            print(f'   Files: {len(manifest)}')
+            print(f'   Duration: {duration:.4f} seconds')
+            print(f'   Manifest: {manifest_path.name}')
+        
+        # Save JSON report
+        report = {
             'status': 'success',
             'timestamp': timestamp,
-            'source': str(SOURCE),
+            'source': str(source),
             'archive': str(backup_file.name),
             'size': size_display,
             'size_bytes': size_bytes,
@@ -151,46 +193,48 @@ if __name__ == '__main__':
             'duration_seconds': round(duration, 4),
             'manifest': str(manifest_path.name)
         }
-        
-        report_path = BACKUP_DIR / f'report_{timestamp}.json'
+        report_path = dest / f'report_{timestamp}.json'
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
-        logging.info(f'Report sabed: {report_path}')
-
-        # Send rich notification to Discord
-        send_rich_notification(
-            title='✅ Backup Completed Successfully',
-            fields={
-                'Archive': backup_file.name,
-                'Size': size_display,
-                'Files': len(manifest),
-                'Duration': f'{duration:.4f}s'
-            },
-            color=65280
-        )
+        
+        # Send notification if requested
+        if args.notify:
+            send_rich_notification(
+                title='✅ Backup Completed Successfully',
+                fields={
+                    'Archive': backup_file.name,
+                    'Size': size_display,
+                    'Files': len(manifest),
+                    'Duration': f'{duration:.4f}s'
+                },
+                color=65280  # Green
+            )
     else:
-        # Terminal output
-        print(f'\n Backup failed. Check log: {BACKUP_DIR / "backup.log"}')
-
-        # Save failure report
+        if not args.quiet:
+            print(f'\n❌ Backup failed. Check log: {dest / "backup.log"}')
+        
         report = {
             'status': 'failure',
             'timestamp': timestamp,
-            'source': str(SOURCE),
-            'duration_seconds': round(duration, 2),
+            'source': str(source),
+            'duration_seconds': round(duration, 4),
             'error': 'See backup.log for details'
         }
-        report_path = BACKUP_DIR / f'report_{timestamp}.json'
+        report_path = dest / f'report_{timestamp}.json'
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
+        
+        if args.notify:
+            send_rich_notification(
+                title='❌ Backup Failed',
+                fields={
+                    'Source': str(source),
+                    'Timestamp': timestamp,
+                    'Duration': f'{duration:.4f}s'
+                },
+                color=16711680  # Red
+            )
 
-        # Send failure notification
-        send_rich_notification(
-            title='Backup failed',
-            fields={
-                'Source': str(SOURCE),
-                'Timestamp': timestamp,
-                'Duration': f'{duration:.2f}s'
-            },
-            color=16711680 # Red
-        )
+
+if __name__ == '__main__':
+    main()
